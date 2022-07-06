@@ -10,9 +10,13 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.utils import save_image
 from torchvision.datasets import MNIST
+from torch.utils.tensorboard import SummaryWriter
 import os
 try:
-    from apex import amp
+    from apex.parallel import DistributedDataParallel as DDP
+    from apex.fp16_utils import *
+    from apex import amp, optimizers
+    from apex.multi_tensor_apply import multi_tensor_applier
 except ImportError:
     raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
 import matplotlib.pyplot as plt
@@ -24,11 +28,12 @@ if not os.path.exists('./dc_img'):
 def to_img(x):
     x = 0.5 * (x + 1)
     x = x.clamp(0, 1)
+
     x = x.view(x.size(0), 1, 28, 28)
     return x
 
 
-num_epochs = 10
+num_epochs = 1
 batch_size = 128
 learning_rate = 1e-3
 
@@ -69,38 +74,37 @@ class autoencoder(nn.Module):
 
 model = autoencoder().cuda()
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
-                             weight_decay=1e-5)
-model, optimizer = amp.initialize(model, optimizer, opt_level="O1") #!!!
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+model, optimizer = amp.initialize(model, optimizer, opt_level="O2",loss_scale=1)
+
+loss_values = []
 
 
-loss_values = []                                            #p
-
+writer = SummaryWriter('/runs/cae')
+step=0
 for epoch in range(num_epochs):
-    total_loss = 0
-    for data in dataloader:
+    for i,data in enumerate(dataloader):
         img, _ = data
         img = Variable(img).cuda()
-        # ===================forward=====================
+        # ---- forward -------------------------------------------------------
         output = model(img)
         loss = criterion(output, img)
         print('loss:',loss.item())
-        loss_values.append(loss.item())
-        # ===================backward====================
+        # ---- backward ------------------------------------------------------
         optimizer.zero_grad()
-        with amp.scale_loss(loss, optimizer) as scaled_loss: #!!!
-            scaled_loss.backward()                           #!!!
+        with amp.scale_loss(loss, optimizer) as scaled_loss:
+            scaled_loss.backward()
         optimizer.step()
-        total_loss += loss.data
-    # ===================log========================
-    print('epoch [{}/{}], loss:{:.4f}'
-          .format(epoch+1, num_epochs, total_loss))
-    if epoch % 10 == 0:
-        pic = to_img(output.cpu().data)
-        save_image(pic, './dc_img/image_{}.png'.format(epoch))
+        # ---- log -----------------------------------------------------------
+        writer.add_scalar('training_loss',loss.item(),global_step=step)
+        writer.add_scalar('en_conv0.bias_0',model.encoder[0].bias[0],global_step=step)
+        writer.add_scalar('de_conv0.bias_0',model.decoder[0].bias[0],global_step=step)
+        writer.add_histogram('en_conv0.weight',model.encoder[0].weight,global_step=step)
+        writer.add_histogram('en_conv1.weight',model.encoder[3].weight,global_step=step)
+        writer.add_histogram('de_conv0.weight',model.decoder[0].weight,global_step=step)
+        writer.add_histogram('de_conv1.weight',model.decoder[2].weight,global_step=step)
+        writer.add_histogram('de_conv2.weight',model.decoder[4].weight,global_step=step)
+        step+=1
+writer.close()
 
-plt.plot(loss_values)
-np.save('loss_values_mixe.npy',loss_values)
-plt.savefig('image.png')
-
-torch.save(model.state_dict(), './conv_autoencoder.pth')
+#torch.save(model.state_dict(), './conv_autoencoder.pth')
