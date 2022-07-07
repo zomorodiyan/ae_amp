@@ -1,17 +1,20 @@
-__author__ = 'SherlockLiao'
+import os
 import numpy as np
+import matplotlib.pyplot as plt
 
 import torch
-import torch.optim
-import torchvision
 from torch import nn
+from torch import optim
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
+
+import torchvision
 from torchvision import transforms
 from torchvision.utils import save_image
 from torchvision.datasets import MNIST
 from torch.utils.tensorboard import SummaryWriter
-import os
+from torch.cuda import profiler
+
 try:
     from apex.parallel import DistributedDataParallel as DDP
     from apex.fp16_utils import *
@@ -19,19 +22,16 @@ try:
     from apex.multi_tensor_apply import multi_tensor_applier
 except ImportError:
     raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
-import matplotlib.pyplot as plt
+
 
 if not os.path.exists('./dc_img'):
     os.mkdir('./dc_img')
 
-
 def to_img(x):
     x = 0.5 * (x + 1)
     x = x.clamp(0, 1)
-
     x = x.view(x.size(0), 1, 28, 28)
     return x
-
 
 num_epochs = 1
 batch_size = 128
@@ -74,37 +74,49 @@ class autoencoder(nn.Module):
 
 model = autoencoder().cuda()
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-model, optimizer = amp.initialize(model, optimizer, opt_level="O2",loss_scale=1)
+optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+model, optimizer = amp.initialize(model, optimizer, opt_level="O1",loss_scale=1)
 
 loss_values = []
 
+writer = SummaryWriter('./runs/cae_log')
 
-writer = SummaryWriter('/runs/cae')
-step=0
+global_step=0
 for epoch in range(num_epochs):
     for i,data in enumerate(dataloader):
         img, _ = data
         img = Variable(img).cuda()
-        # ---- forward -------------------------------------------------------
+
+        # ~~~~ forward ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         output = model(img)
         loss = criterion(output, img)
         print('loss:',loss.item())
-        # ---- backward ------------------------------------------------------
+
+        # ~~~~ backward ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         optimizer.zero_grad()
         with amp.scale_loss(loss, optimizer) as scaled_loss:
             scaled_loss.backward()
         optimizer.step()
-        # ---- log -----------------------------------------------------------
-        writer.add_scalar('training_loss',loss.item(),global_step=step)
-        writer.add_scalar('en_conv0.bias_0',model.encoder[0].bias[0],global_step=step)
-        writer.add_scalar('de_conv0.bias_0',model.decoder[0].bias[0],global_step=step)
-        writer.add_histogram('en_conv0.weight',model.encoder[0].weight,global_step=step)
-        writer.add_histogram('en_conv1.weight',model.encoder[3].weight,global_step=step)
-        writer.add_histogram('de_conv0.weight',model.decoder[0].weight,global_step=step)
-        writer.add_histogram('de_conv1.weight',model.decoder[2].weight,global_step=step)
-        writer.add_histogram('de_conv2.weight',model.decoder[4].weight,global_step=step)
-        step+=1
-writer.close()
 
+        # ~~~~ tensorboard ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        def log_scale(a):
+          return np.log(np.abs(a.cpu().detach().numpy()))
+
+        convolution_layers = {
+          "En0":model.encoder[0], "En1":model.encoder[3],
+          "De0":model.decoder[0], "De1":model.decoder[2], "De2":model.decoder[4],}
+
+        for layer_name in convolution_layers:
+          #weight = convolution_layers[layer_name].weight
+          weightGrad = convolution_layers[layer_name].weight.grad
+          #bias = convolution_layers[layer_name].bias
+          #biasGrad = convolution_layers[layer_name].bias.grad
+
+          writer.add_histogram(layer_name+"_WGrad",weightGrad,global_step=global_step)
+          writer.add_histogram(layer_name+"_WGrad_Log",log_scale(weightGrad),global_step=global_step)
+
+        writer.add_scalar('training_loss',loss.item(),global_step=global_step)
+        global_step+=1
+
+writer.close()
 #torch.save(model.state_dict(), './conv_autoencoder.pth')
