@@ -1,7 +1,8 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-
+import h5py
+from tqdm import tqdm as tqdm # progress-bar for loops
 
 import torch
 from torch import nn
@@ -11,9 +12,11 @@ from torch.utils.data import DataLoader
 
 import torchvision
 from torchvision import transforms
-from torchvision.datasets import MNIST
+#from torchvision.datasets import MNIST
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda import profiler
+from torch.utils.data import Dataset
+
 
 from torchsummary import summary
 
@@ -32,38 +35,93 @@ def to_img(x):
     x = x.view(x.size(0), 1, 28, 28)
     return x
 
-num_epochs = 5
+num_epochs = 100
 batch_size = 128
-learning_rate = 1e-3
+learning_rate = 1e-5
 
+'''
 img_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.5), (0.5))
 ])
-
 dataset = MNIST('./data', transform=img_transform, download=True)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+'''
 
+
+#%%
+f = h5py.File('sst_weekly.mat','r') # can be downloaded from https://drive.google.com/drive/folders/1pVW4epkeHkT2WHZB7Dym5IURcfOP4cXu?usp=sharing
+lat = np.array(f['lat'])
+lon = np.array(f['lon'])
+sst = np.array(f['sst'])
+
+sst2 = np.zeros((len(sst[:,0]),len(lat[0,:]),len(lon[0,:])))
+for i in tqdm(range(len(sst[:,0]))):
+    sst2[i,:,:] = np.flipud((sst[i,:].reshape(len(lat[0,:]),len(lon[0,:]),order='F')))
+
+
+#sst_no_nan = np.nan_to_num(sst)
+sst = sst.T
+num_samples = sst.shape[1]
+
+for i in range(num_samples):
+    nan_array = np.isnan(sst[:,i])
+    not_nan_array = ~ nan_array
+    array2 = sst[:,i][not_nan_array]
+    if i == 0:
+        num_points = array2.shape[0]
+        sst_masked = np.zeros((array2.shape[0],num_samples))
+    sst_masked[:,i] = array2
+
+#%%
+train_end = 1500
+u = sst_masked[:,:train_end]
+utest  = sst_masked[:,train_end:]
+
+u_small = np.zeros((int(u.shape[0]/10),u.shape[1]))
+for i in range(int(u.shape[0]/10)):
+  for j in range(u.shape[1]):
+    u_small[i,j] = u[10*i,j]
+
+
+
+class sstDataset(Dataset):
+  def __init__(self):
+    # data loading
+    self.x = u_small/18
+    self.y = u_small/18
+    self.n_samples = u_small.shape[1]
+
+  def __getitem__(self, index):
+    return self.x[:,index], self.y[:,index]
+
+  def __len__(self):
+    return self.n_samples
+
+dataset = sstDataset()
+xx,yy = dataset[0]
+print('xxx,yyy')
+print(xx[:3],yy[:3])
+
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 class autoencoder(nn.Module):
     def __init__(self):
         super(autoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 12, 3, stride=3, padding=1),  # b, 16, 10, 10
+            nn.Linear(4421, 1000),
             nn.ReLU(True),
-            nn.MaxPool2d(2, stride=2),  # b, 16, 5, 5
-            nn.Conv2d(12, 8, 3, stride=2, padding=1),  # b, 8, 3, 3
+            nn.Linear(1000, 100),
             nn.ReLU(True),
-            nn.MaxPool2d(2, stride=1)  # b, 8, 2, 2
-        )
+            nn.Linear(100, 40),
+            nn.ReLU(True),
+            nn.Linear(40, 30))
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(8, 16, 3, stride=2),  # b, 16, 5, 5
+            nn.Linear(30, 40),
             nn.ReLU(True),
-            nn.ConvTranspose2d(16, 8, 5, stride=3, padding=1),  # b, 8, 15, 15
+            nn.Linear(40, 100),
             nn.ReLU(True),
-            nn.ConvTranspose2d(8, 1, 2, stride=2, padding=1),  # b, 1, 28, 28
-            nn.Tanh()
-        )
+            nn.Linear(100, 1000),
+            nn.ReLU(True), nn.Linear(1000, 4421))
 
     def forward(self, x):
         x = self.encoder(x)
@@ -72,12 +130,11 @@ class autoencoder(nn.Module):
 
 
 model = autoencoder().cuda()
-summary(model, (1, 28, 28))
 
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
 model, optimizer = amp.initialize(model, optimizer,
-                                  opt_level="O0",loss_scale=0.01)
+                                  opt_level="O1",loss_scale=0.01)
 
 loss_values = []
 
@@ -106,6 +163,7 @@ for epoch in range(num_epochs):
         optimizer.step()
 
         # ~~~~ tensorboard ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        '''
         def log_scale(a):
           return np.log(np.abs(a.cpu().detach().numpy()))
 
@@ -121,8 +179,20 @@ for epoch in range(num_epochs):
 
           writer.add_histogram(layer_name+"_WGrad_tensorflow_bins",weightGrad,global_step=global_step,bins='fd')
           writer.add_histogram(layer_name+"_WGrad_Log",log_scale(weightGrad),global_step=global_step)
+        '''
 
         writer.add_scalar('training_loss',loss.item(),global_step=global_step)
         global_step+=1
-
 writer.close()
+
+
+'''
+fig,axs = plt.subplots(1,1, figsize=(10,8))
+current_cmap = plt.cm.get_cmap('RdYlBu')
+current_cmap.set_bad(color='black',alpha=0.8)
+cs = axs.imshow(sst2[0,:,:],cmap='RdYlBu')
+# axs.grid()
+fig.colorbar(cs, ax=axs, orientation='vertical',shrink=0.4)
+fig.tight_layout()
+plt.savefig('img.png')
+'''
