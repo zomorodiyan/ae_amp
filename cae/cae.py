@@ -2,6 +2,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 import torch
 from torch import nn
 from torch import optim
@@ -10,10 +11,11 @@ from torch.utils.data import DataLoader
 
 import torchvision
 from torchvision import transforms
-from torchvision.utils import save_image
 from torchvision.datasets import MNIST
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda import profiler
+
+from torchsummary import summary
 
 try:
     from apex.parallel import DistributedDataParallel as DDP
@@ -21,11 +23,8 @@ try:
     from apex import amp, optimizers
     from apex.multi_tensor_apply import multi_tensor_applier
 except ImportError:
-    raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
+    raise ImportError("install apex from https://www.github.com/nvidia/apex")
 
-
-if not os.path.exists('./dc_img'):
-    os.mkdir('./dc_img')
 
 def to_img(x):
     x = 0.5 * (x + 1)
@@ -33,7 +32,7 @@ def to_img(x):
     x = x.view(x.size(0), 1, 28, 28)
     return x
 
-num_epochs = 1
+num_epochs = 5
 batch_size = 128
 learning_rate = 1e-3
 
@@ -50,10 +49,10 @@ class autoencoder(nn.Module):
     def __init__(self):
         super(autoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 16, 3, stride=3, padding=1),  # b, 16, 10, 10
+            nn.Conv2d(1, 12, 3, stride=3, padding=1),  # b, 16, 10, 10
             nn.ReLU(True),
             nn.MaxPool2d(2, stride=2),  # b, 16, 5, 5
-            nn.Conv2d(16, 8, 3, stride=2, padding=1),  # b, 8, 3, 3
+            nn.Conv2d(12, 8, 3, stride=2, padding=1),  # b, 8, 3, 3
             nn.ReLU(True),
             nn.MaxPool2d(2, stride=1)  # b, 8, 2, 2
         )
@@ -73,13 +72,21 @@ class autoencoder(nn.Module):
 
 
 model = autoencoder().cuda()
+summary(model, (1, 28, 28))
+
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-model, optimizer = amp.initialize(model, optimizer, opt_level="O1",loss_scale=1)
+model, optimizer = amp.initialize(model, optimizer,
+                                  opt_level="O0",loss_scale=0.01)
 
 loss_values = []
 
-writer = SummaryWriter('./runs/cae_log')
+# ~~~~ tensorboard ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Sets up a timestamped log directory.
+logdir = "logs/cae/O0"
+
+# Creates a file writer for the log directory.
+writer = SummaryWriter(logdir)
 
 global_step=0
 for epoch in range(num_epochs):
@@ -112,11 +119,10 @@ for epoch in range(num_epochs):
           #bias = convolution_layers[layer_name].bias
           #biasGrad = convolution_layers[layer_name].bias.grad
 
-          writer.add_histogram(layer_name+"_WGrad",weightGrad,global_step=global_step)
+          writer.add_histogram(layer_name+"_WGrad_tensorflow_bins",weightGrad,global_step=global_step,bins='fd')
           writer.add_histogram(layer_name+"_WGrad_Log",log_scale(weightGrad),global_step=global_step)
 
         writer.add_scalar('training_loss',loss.item(),global_step=global_step)
         global_step+=1
 
 writer.close()
-#torch.save(model.state_dict(), './conv_autoencoder.pth')
