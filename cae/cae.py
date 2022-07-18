@@ -79,7 +79,7 @@ model, optimizer = amp.initialize(model, optimizer, opt_level="O1",loss_scale=1)
 
 loss_values = []
 
-writer = SummaryWriter('./runs/cae_log')
+writer = SummaryWriter('./runs/cae_log2')
 
 global_step=0
 for epoch in range(num_epochs):
@@ -100,17 +100,20 @@ for epoch in range(num_epochs):
 
         # ~~~~ tensorboard ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         def log_scale(a):
-          return np.log(np.abs(a.cpu().detach().numpy()))
+          #return np.log10(np.abs(a.cpu().detach().numpy()))
+          return np.log10(np.abs(a.cpu().numpy()))
 
         convolution_layers = {
           "En0":model.encoder[0], "En1":model.encoder[3],
           "De0":model.decoder[0], "De1":model.decoder[2], "De2":model.decoder[4],}
+
 
         for layer_name in convolution_layers:
           #weight = convolution_layers[layer_name].weight
           weightGrad = convolution_layers[layer_name].weight.grad
           #bias = convolution_layers[layer_name].bias
           #biasGrad = convolution_layers[layer_name].bias.grad
+
 
           writer.add_histogram(layer_name+"_WGrad",weightGrad,global_step=global_step)
           writer.add_histogram(layer_name+"_WGrad_Log",log_scale(weightGrad),global_step=global_step)
